@@ -1,6 +1,7 @@
 <?php
+
 /**
- * Abstract minifier class
+ * Abstract minifier class.
  *
  * Please report bugs on https://github.com/matthiasmullie/minify/issues
  *
@@ -8,9 +9,11 @@
  * @copyright Copyright (c) 2012, Matthias Mullie. All rights reserved
  * @license MIT License
  */
+
 namespace MatthiasMullie\Minify;
 
 use MatthiasMullie\Minify\Exceptions\IOException;
+use MatthiasMullie\Minify\Exceptions\PatternMatchException;
 use Psr\Cache\CacheItemInterface;
 
 /**
@@ -18,7 +21,6 @@ use Psr\Cache\CacheItemInterface;
  *
  * Please report bugs on https://github.com/matthiasmullie/minify/issues
  *
- * @package Minify
  * @author Matthias Mullie <minify@mullie.eu>
  * @copyright Copyright (c) 2012, Matthias Mullie. All rights reserved
  * @license MIT License
@@ -43,6 +45,8 @@ abstract class Minify
      * This array will hold content of strings and regular expressions that have
      * been extracted from the JS source code, so we can reliably match "code",
      * without having to worry about potential "code-like" characters inside.
+     *
+     * @internal
      *
      * @var string[]
      */
@@ -128,7 +132,7 @@ abstract class Minify
 
             // check if we can read the file
             if (!$this->canImportFile($path)) {
-                throw new IOException('The file "'.$path.'" could not be opened for reading. Check if PHP has enough permissions.');
+                throw new IOException('The file "' . $path . '" could not be opened for reading. Check if PHP has enough permissions.');
             }
 
             $this->add($path);
@@ -227,7 +231,7 @@ abstract class Minify
      * Save to file.
      *
      * @param string $content The minified data
-     * @param string $path    The path to save the minified data to
+     * @param string $path The path to save the minified data to
      *
      * @throws IOException
      */
@@ -246,7 +250,7 @@ abstract class Minify
      * If $replacement is a string, it must be plain text. Placeholders like $1 or \2 don't work.
      * If you need that functionality, use a callback instead.
      *
-     * @param string          $pattern     PCRE pattern
+     * @param string $pattern PCRE pattern
      * @param string|callable $replacement Replacement value for matched pattern
      */
     protected function registerPattern($pattern, $replacement = '')
@@ -255,6 +259,45 @@ abstract class Minify
         $pattern .= 'S';
 
         $this->patterns[] = array($pattern, $replacement);
+    }
+
+    /**
+     * Both JS and CSS use the same form of multi-line comment, so putting the common code here.
+     */
+    protected function stripMultilineComments()
+    {
+        $minifier = $this;
+        // Pattern for matching comments that we want to preserve
+        $keepPattern = '/^
+            # comment content
+            (?:
+                # either starts with an !
+                !
+            |
+                # or, after some number of characters which do not end the comment
+                (?:(?!\*\/).)*?
+
+                # there is either a @license or @preserve tag
+                @(?:license|preserve)
+            )
+            /ixs';
+        $callback = function ($match) use ($minifier, $keepPattern) {
+            if (preg_match($keepPattern, $match[1])) {
+                // Preserve the comment
+                $count = count($minifier->extracted);
+                $placeholder = '/*' . $count . '*/';
+                $minifier->extracted[$placeholder] = $match[0];
+            } else {
+                // Discard the comment but keep any single line feed
+                $placeholder = strncmp($match[0], "\n", 1) === 0 || substr($match[0], -1) === "\n"
+                    ? "\n"
+                    : '';
+            }
+
+            return $placeholder;
+        };
+
+        $this->registerPattern('/\n?\/\*(.*?)\*\/\n?/s', $callback);
     }
 
     /**
@@ -268,6 +311,8 @@ abstract class Minify
      * @param string $content The content to replace patterns in
      *
      * @return string The (manipulated) content
+     *
+     * @throws PatternMatchException
      */
     protected function replace($content)
     {
@@ -295,7 +340,8 @@ abstract class Minify
                 }
 
                 $match = null;
-                if (preg_match($pattern, $content, $match, PREG_OFFSET_CAPTURE, $processedOffset)) {
+                $matchResult = preg_match($pattern, $content, $match, PREG_OFFSET_CAPTURE, $processedOffset);
+                if ($matchResult) {
                     $matches[$i] = $match;
 
                     // we'll store the match position as well; that way, we
@@ -303,6 +349,11 @@ abstract class Minify
                     // the first (we'll still know where those others are)
                     $positions[$i] = $match[0][1];
                 } else {
+                    if ($matchResult === false) {
+                        throw PatternMatchException::fromLastError(
+                            "Failed to match pattern '$pattern' at $processedOffset"
+                        );
+                    }
                     // if the pattern couldn't be matched, there's no point in
                     // executing it again in later runs on this same content;
                     // ignore this one until we reach end of content
@@ -344,7 +395,7 @@ abstract class Minify
      * If it's a string, just pass it through.
      *
      * @param string|callable $replacement Replacement value
-     * @param array           $match       Match data, in PREG_OFFSET_CAPTURE form
+     * @param array $match Match data, in PREG_OFFSET_CAPTURE form
      *
      * @return string
      */
@@ -357,6 +408,7 @@ abstract class Minify
         foreach ($match as &$matchItem) {
             $matchItem = $matchItem[0];
         }
+
         return $replacement($match);
     }
 
@@ -391,13 +443,18 @@ abstract class Minify
             }
 
             $count = count($minifier->extracted);
-            $placeholder = $match[1].$placeholderPrefix.$count.$match[1];
-            $minifier->extracted[$placeholder] = $match[1].$match[2].$match[1];
+            $placeholder = $match[1] . $placeholderPrefix . $count . $match[1];
+            $minifier->extracted[$placeholder] = $match[1] . $match[2] . $match[1];
 
             return $placeholder;
         };
 
         /*
+         * Quantifier {0,65535} is used instead of *? to avoid exceeding
+         * backtrack limit with large strings. 65535 is the maximum allowed
+         * (see https://www.php.net/manual/en/regexp.reference.repetition.php)
+         * and should be well sufficient for string representations here.
+         *
          * The \\ messiness explained:
          * * Don't count ' or " as end-of-string if it's escaped (has backslash
          * in front of it)
@@ -409,7 +466,8 @@ abstract class Minify
          * considered as escape-char (times 2) and to get it in the regex,
          * escaped (times 2)
          */
-        $this->registerPattern('/(['.$chars.'])(.*?(?<!\\\\)(\\\\\\\\)*+)\\1/s', $callback);
+
+        $this->registerPattern('/([' . $chars . '])(.{0,65535}?(?<!\\\\)(\\\\\\\\)*+)\\1/s', $callback);
     }
 
     /**
@@ -447,14 +505,20 @@ abstract class Minify
         $parsed = parse_url($path);
         if (
             // file is elsewhere
-            isset($parsed['host']) ||
+            isset($parsed['host'])
             // file responds to queries (may change, or need to bypass cache)
-            isset($parsed['query'])
+            || isset($parsed['query'])
         ) {
             return false;
         }
 
-        return strlen($path) < PHP_MAXPATHLEN && @is_file($path) && is_readable($path);
+        try {
+            return strlen($path) < PHP_MAXPATHLEN && @is_file($path) && is_readable($path);
+        }
+        // catch openbasedir exceptions which are not caught by @ on is_file()
+        catch (\Exception $e) {
+            return false;
+        }
     }
 
     /**
@@ -469,7 +533,7 @@ abstract class Minify
     protected function openFileForWriting($path)
     {
         if ($path === '' || ($handler = @fopen($path, 'w')) === false) {
-            throw new IOException('The file "'.$path.'" could not be opened for writing. Check if PHP has enough permissions.');
+            throw new IOException('The file "' . $path . '" could not be opened for writing. Check if PHP has enough permissions.');
         }
 
         return $handler;
@@ -479,19 +543,29 @@ abstract class Minify
      * Attempts to write $content to the file specified by $handler. $path is used for printing exceptions.
      *
      * @param resource $handler The resource to write to
-     * @param string   $content The content to write
-     * @param string   $path    The path to the file (for exception printing only)
+     * @param string $content The content to write
+     * @param string $path The path to the file (for exception printing only)
      *
      * @throws IOException
      */
     protected function writeToFile($handler, $content, $path = '')
     {
         if (
-            !is_resource($handler) ||
-            ($result = @fwrite($handler, $content)) === false ||
-            ($result < strlen($content))
+            !is_resource($handler)
+            || ($result = @fwrite($handler, $content)) === false
+            || ($result < strlen($content))
         ) {
-            throw new IOException('The file "'.$path.'" could not be written to. Check your disk space and file permissions.');
+            throw new IOException('The file "' . $path . '" could not be written to. Check your disk space and file permissions.');
         }
+    }
+
+    protected static function str_replace_first($search, $replace, $subject)
+    {
+        $pos = strpos($subject, $search);
+        if ($pos !== false) {
+            return substr_replace($subject, $replace, $pos, strlen($search));
+        }
+
+        return $subject;
     }
 }

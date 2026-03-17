@@ -1,26 +1,29 @@
 <?php
+if (!defined('ABSPATH')) die('Access denied.');
 
 /**
  * Class WP_Optimize_Gzip_Compression
  */
 class WP_Optimize_Gzip_Compression {
 
+	use WP_Optimize_HTTP_Error_Codes_Trait;
+	
 	/**
 	 * WP_Optimize_Htaccess instance.
 	 *
 	 * @var WP_Optimize_Htaccess
 	 */
-	private $_htaccess = null;
+	private $_htaccess;
 
 	/**
 	 * WP_Optimize instance.
 	 *
 	 * @var WP_Optimize
 	 */
-	private $_wp_optimize = null;
+	private $_wp_optimize;
 
 	/**
-	 * Gzip section in htaccess will wrapped with this comment
+	 * Gzip section in htaccess will be wrapped with this comment
 	 *
 	 * @var string
 	 */
@@ -56,7 +59,7 @@ class WP_Optimize_Gzip_Compression {
 		static $headers_information;
 		if (isset($headers_information)) return $headers_information;
 
-		$headers = WP_Optimize()->get_stylesheet_headers();
+		$headers = $this->get_stylesheet_headers();
 
 		if (is_wp_error($headers)) return $headers;
 
@@ -127,8 +130,8 @@ class WP_Optimize_Gzip_Compression {
 		// if we got error then trying to get info from api otherwise get result from check_headers_for_gzip().
 		// $is_gzip_compression_enabled = is_wp_error($is_gzip_compression_enabled) ? $this->check_api_for_gzip() : $is_gzip_compression_enabled;
 
-		// if Gzip is not enabled but we have added settings and Apache modules nt loaded then return error.
-		if (false == $is_gzip_compression_enabled && $this->is_gzip_compression_section_exists()) {
+		// if Gzip is not enabled, but we have added settings and Apache modules nt loaded then return error.
+		if (!$is_gzip_compression_enabled && $this->is_gzip_compression_section_exists()) {
 			if (false === $this->_wp_optimize->is_apache_module_loaded(array('mod_filter', 'mod_deflate'))) {
 				return new WP_Error('gzip_missing_module', __('We successfully added Gzip compression settings into .htaccess file.', 'wp-optimize').' '.__('However, the test file we fetched was not Gzip-compressed.', 'wp-optimize').' '.__('It seems one of Apache modules - mod_filter or mod_deflate - is not active.', 'wp-optimize'));
 			} elseif (WP_Optimize()->is_apache_server()) {
@@ -186,7 +189,7 @@ class WP_Optimize_Gzip_Compression {
 	public function enable_gzip_command_handler($params) {
 		$section_updated = false;
 
-		$enable = (isset($params['enable']) && $params['enable']) ? true : false;
+		$enable = isset($params['enable']) && $params['enable'];
 
 		if ($this->_htaccess->is_writable()) {
 
@@ -218,8 +221,10 @@ class WP_Optimize_Gzip_Compression {
 			$gzip_section = $this->prepare_gzip_section();
 
 			if ($is_gzip_compression_enabled) {
+				// translators: %s is a file name
 				$message = sprintf(__("We can\'t update your %s file.", 'wp-optimize'), $this->_htaccess->get_filename()) . ' ' . __('Please try to remove following lines manually:', 'wp-optimize');
 			} else {
+				// translators: %s is a file name
 				$message = sprintf(__("We can\'t update your %s file.", 'wp-optimize'), $this->_htaccess->get_filename()) . ' ' . __('Please try to add following lines manually:', 'wp-optimize');
 			}
 

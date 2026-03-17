@@ -245,8 +245,17 @@ class Math_BigInteger
     function __construct($x = 0, $base = 10)
     {
         if (!defined('MATH_BIGINTEGER_MODE')) {
+
+            // https://github.com/php/php-src/commit/e0a0e216a909dc4ee4ea7c113a5f41d49525f02e broke GMP
+            // https://github.com/php/php-src/commit/424ba0f2ff9677d16b4e339e90885bd4bc49fcf1 fixed it
+            // see https://github.com/php/php-src/issues/16870 for more info
+            if (version_compare(PHP_VERSION, '8.2.25', '<=')) {
+                $gmpOK = true;
+            } else {
+                $gmpOK = !in_array(PHP_VERSION_ID, array(80226, 80314, 80400, 80401));
+            }
             switch (true) {
-                case extension_loaded('gmp'):
+                case extension_loaded('gmp') && $gmpOK:
                     define('MATH_BIGINTEGER_MODE', MATH_BIGINTEGER_MODE_GMP);
                     break;
                 case extension_loaded('bcmath'):
@@ -597,7 +606,7 @@ class Math_BigInteger
 
                 while (bccomp($current, '0', 0) > 0) {
                     $temp = bcmod($current, '16777216');
-                    $value = chr($temp >> 16) . chr($temp >> 8) . chr($temp) . $value;
+                    $value = chr($temp >> 16) . chr(($temp >> 8) & 0xFF) . chr($temp & 0xFF) . $value;
                     $current = bcdiv($current, '16777216', 0);
                 }
 
@@ -750,6 +759,33 @@ class Math_BigInteger
     }
 
     /**
+     * Return the size of a BigInteger in bits
+     *
+     * @return int
+     */
+    function getLength()
+    {
+        if (MATH_BIGINTEGER_MODE != MATH_BIGINTEGER_MODE_INTERNAL) {
+            return strlen($this->toBits());
+        }
+
+        $max = count($this->value) - 1;
+        return $max != -1 ?
+            $max * MATH_BIGINTEGER_BASE + intval(ceil(log($this->value[$max] + 1, 2))) :
+            0;
+    }
+
+    /**
+     * Return the size of a BigInteger in bytes
+     *
+     * @return int
+     */
+    function getLengthInBytes()
+    {
+        return (int) ceil($this->getLength() / 8);
+    }
+
+    /**
      * Copy an object
      *
      * PHP5 passes objects by reference while PHP4 passes by value.  As such, we need a function to guarantee
@@ -836,6 +872,44 @@ class Math_BigInteger
         if ($this->precision > 0) {
             // recalculate $this->bitmask
             $this->setPrecision($this->precision);
+        }
+    }
+
+    /**
+     *  __serialize() magic method
+     *
+     * __sleep / __wakeup were depreciated in PHP 8.5
+     * Will be called, automatically, when serialize() is called on a Math_BigInteger object.
+     *
+     * @see self::__unserialize()
+     * @access public
+     */
+    function __serialize()
+    {
+        $result = array('hex' => $this->toHex(true));
+        if ($this->precision > 0) {
+            $result['precision'] = $this->precision;
+        }
+        return $result;
+    }
+
+    /**
+     *  __unserialize() magic method
+     *
+     * __sleep / __wakeup were depreciated in PHP 8.5
+     * Will be called, automatically, when unserialize() is called on a Math_BigInteger object.
+     *
+     * @see self::__serialize()
+     * @access public
+     */
+    function __unserialize($data)
+    {
+        $temp = new Math_BigInteger($data['hex'], -16);
+        $this->value = $temp->value;
+        $this->is_negative = $temp->is_negative;
+        if (isset($data['precision']) && $data['precision'] > 0) {
+            // recalculate $this->bitmask
+            $this->setPrecision($data['precision']);
         }
     }
 
@@ -3286,6 +3360,11 @@ class Math_BigInteger
             $min = $temp;
         }
 
+        $length = $max->getLength();
+        if ($length > 8196) {
+            user_error('Generation of random prime numbers larger than 8196 has been disabled');
+        }
+
         static $one, $two;
         if (!isset($one)) {
             $one = new Math_BigInteger(1);
@@ -3393,7 +3472,14 @@ class Math_BigInteger
      */
     function isPrime($t = false)
     {
-        $length = strlen($this->toBytes());
+        $length = $this->getLength();
+        // OpenSSL limits RSA keys to 16384 bits. The length of an RSA key is equal to the length of the modulo, which is
+        // produced by multiplying the primes p and q by one another. The largest number two 8196 bit primes can produce is
+        // a 16384 bit number so, basically, 8196 bit primes are the largest OpenSSL will generate and if that's the largest
+        // that it'll generate it also stands to reason that that's the largest you'll be able to test primality on
+        if ($length > 8196) {
+            user_error('Primality testing is not supported for numbers larger than 8196 bits');
+        }
 
         if (!$t) {
             // see HAC 4.49 "Note (controlling the error probability)"
@@ -3714,8 +3800,8 @@ class Math_BigInteger
 
         $carry = 0;
         for ($i = strlen($x) - 1; $i >= 0; --$i) {
-            $temp = ord($x[$i]) << $shift | $carry;
-            $x[$i] = chr($temp);
+            $temp = (ord($x[$i]) << $shift) | $carry;
+            $x[$i] = chr($temp & 0xFF);
             $carry = $temp >> 8;
         }
         $carry = ($carry != 0) ? chr($carry) : '';

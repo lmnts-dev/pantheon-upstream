@@ -1,7 +1,10 @@
 var WP_Optimize_Cache = function () {
 
 	var $ = jQuery;
+	var block_ui = wp_optimize.block_ui;
 	var send_command = wp_optimize.send_command;
+	var heartbeat = WP_Optimize_Heartbeat();
+	var heartbeat_agents = [];
 
 	var browser_cache_enable_btn = $('#wp_optimize_browser_cache_enable'),
 		purge_cache_btn = $('#wp-optimize-purge-cache'),
@@ -12,13 +15,17 @@ var WP_Optimize_Cache = function () {
 	 * Handle purge cache btn.
 	 */
 	purge_cache_btn.on('click', function() {
+
 		var btn = $(this),
 			spinner = btn.next(),
 			success_icon = spinner.next();
 
+		if (btn.prop('disabled')) return false;
+		btn.prop('disabled', true);
 		spinner.show();
 
 		send_command('purge_page_cache', {}, function(response) {
+			btn.prop('disabled', false);
 			spinner.hide();
 			success_icon.show();
 			setTimeout(function() {
@@ -146,10 +153,10 @@ var WP_Optimize_Cache = function () {
 		if (isNaN(browser_cache_expire_hours)) browser_cache_expire_hours = 0;
 
 		if (browser_cache_expire_days < 0 || browser_cache_expire_hours < 0) {
-			$('#wpo_browser_cache_error_message').text(wpoptimize.please_use_positive_integers).show();
+			alert(wpoptimize.please_use_positive_integers);
 			return false;
 		} else if (browser_cache_expire_hours > 23) {
-			$('#wpo_browser_cache_error_message').text(wpoptimize.please_use_valid_values).show();
+			alert(wpoptimize.please_use_valid_values);
 			return false;
 		} else {
 			$('#wpo_browser_cache_error_message').hide();
@@ -161,44 +168,46 @@ var WP_Optimize_Cache = function () {
 
 		loader.show();
 
-		send_command('enable_browser_cache', {browser_cache_expire_days: browser_cache_expire_days, browser_cache_expire_hours: browser_cache_expire_hours}, function(response) {
-			var cache_status_message = $('#wpo_browser_cache_status');
-			var cache_status_field = $('#wpo_enable_browser_cache');
-			if (response) {
-				if (response.enabled) {
-					button.text(wpoptimize.update);
-					cache_status_message.removeClass('wpo-disabled').addClass('wpo-enabled');
-					cache_status_field.val('true');
+		send_command('enable_browser_cache',
+			{browser_cache_expire_days: browser_cache_expire_days,
+				browser_cache_expire_hours: browser_cache_expire_hours}, function(response) {
+				var cache_status_message = $('#wpo_browser_cache_status');
+				var cache_status_field = $('#wpo_enable_browser_cache');
+				if (response) {
+					if (response.enabled) {
+						button.text(wpoptimize.update);
+						cache_status_message.removeClass('wpo-disabled').addClass('wpo-enabled');
+						cache_status_field.val('true');
+					} else {
+						button.text(wpoptimize.enable);
+						cache_status_message.addClass('wpo-disabled').removeClass('wpo-enabled');
+						cache_status_field.val('false');
+					}
+
+					if (response.message) {
+						$('#wpo_browser_cache_message').text(response.message).show();
+					} else {
+						$('#wpo_browser_cache_message').hide();
+					}
+
+					if (response.error_message) {
+						$('#wpo_browser_cache_error_message').text(response.error_message).show();
+					} else {
+						$('#wpo_browser_cache_error_message').hide();
+					}
+
+					if (response.output) {
+						$('#wpo_browser_cache_output').html(response.output).show();
+					} else {
+						$('#wpo_browser_cache_output').hide();
+					}
+
 				} else {
-					button.text(wpoptimize.enable);
-					cache_status_message.addClass('wpo-disabled').removeClass('wpo-enabled');
-					cache_status_field.val('false');
+					alert(wpoptimize.error_unexpected_response);
 				}
 
-				if (response.message) {
-					$('#wpo_browser_cache_message').text(response.message).show();
-				} else {
-					$('#wpo_browser_cache_message').hide();
-				}
-
-				if (response.error_message) {
-					$('#wpo_browser_cache_error_message').text(response.error_message).show();
-				} else {
-					$('#wpo_browser_cache_error_message').hide();
-				}
-
-				if (response.output) {
-					$('#wpo_browser_cache_output').html(response.output).show();
-				} else {
-					$('#wpo_browser_cache_output').hide();
-				}
-
-			} else {
-				alert(wpoptimize.error_unexpected_response);
-			}
-
-			loader.hide();
-		}).fail(function() {
+				loader.hide();
+			}).fail(function() {
 			alert(wpoptimize.error_unexpected_response);
 			loader.hide();
 		});
@@ -258,7 +267,7 @@ var WP_Optimize_Cache = function () {
 			success_icon = spinner.next();
 
 		spinner.show();
-		$.blockUI();
+		block_ui(wpoptimize.saving);
 
 		send_command('save_cache_settings', { 'cache-settings': gather_cache_settings() }, function(response) {
 
@@ -363,7 +372,6 @@ var WP_Optimize_Cache = function () {
 
 	var run_cache_preload_btn = $('#wp_optimize_run_cache_preload'),
 		cache_preload_status_el = $('#wp_optimize_preload_cache_status'),
-		check_status_interval = null,
 		enable_schedule_preloading = $('#enable_schedule_preload'),
 		preloader_schedule_type_select = $('#preload_schedule_type');
 
@@ -386,8 +394,9 @@ var WP_Optimize_Cache = function () {
 
 		if (is_running) {
 			btn.data('running', false);
-			clearInterval(check_status_interval);
-			check_status_interval = null;
+			
+			heartbeat.cancel_agents(heartbeat_agents);
+
 			send_command(
 				'cancel_cache_preload',
 				null,
@@ -418,7 +427,7 @@ var WP_Optimize_Cache = function () {
 					} catch (e) {
 					}
 
-					if (resp && resp.error) {
+					if (resp && resp.error && 'timeout' !== resp.statusText) {
 
 						var error_text = wpoptimize.error_unexpected_response;
 
@@ -453,16 +462,18 @@ var WP_Optimize_Cache = function () {
 	}
 
 	/**
-	 * Create interval action for update preloader status.
+	 * Create heartbeat agent action for update preloader status.
 	 *
 	 * @return void
 	 */
 	function run_update_cache_preload_status() {
-		if (check_status_interval) return;
+		var agent = heartbeat.add_agent({
+			command: 'get_cache_preload_status',
+			callback: update_cache_preload_status,
+			_keep: false
+		});
 
-		check_status_interval = setInterval(function() {
-			update_cache_preload_status();
-		}, 5000);
+		if (null !== agent) heartbeat_agents.push(agent);
 	}
 
 	/**
@@ -470,21 +481,28 @@ var WP_Optimize_Cache = function () {
 	 *
 	 * @return void
 	 */
-	function update_cache_preload_status() {
-		send_command('get_cache_preload_status', null, function(response) {
-			if (response.done) {
-				run_cache_preload_btn.val(wpoptimize.run_now);
-				run_cache_preload_btn.data('running', false);
-				clearInterval(check_status_interval);
-				check_status_interval = null;
-			} else {
-				run_cache_preload_btn.val(wpoptimize.cancel);
-				run_cache_preload_btn.data('running', true);
-			}
-			cache_preload_status_el.text(response.message);
-			update_cache_size_information(response);
-		});
+	function update_cache_preload_status(response) {
+		if (response.done) {
+			run_cache_preload_btn.val(wpoptimize.run_now);
+			run_cache_preload_btn.data('running', false);
+		} else {
+			run_cache_preload_btn.val(wpoptimize.cancel);
+			run_cache_preload_btn.data('running', true);
+			run_update_cache_preload_status();
+		}
+		cache_preload_status_el.text(response.message);
+		update_cache_size_information(response);
 	}
+
+	// Handle avatar display settings
+	$('#wpo-show-avatars').on('change', function() {
+		if ($(this).is(':checked')) {
+			$('#wpo-host-gravatars-locally-container').show();
+		} else {
+			$('#wpo-host-gravatars-locally').prop('checked', false);
+			$('#wpo-host-gravatars-locally-container').hide();
+		}
+	});
 
 	/**
 	 * Run update information about cache size.
@@ -495,6 +513,32 @@ var WP_Optimize_Cache = function () {
 		$('#wpo_current_cache_size_information').text(wpoptimize.current_cache_size + ' ' + response.size);
 		$('#wpo_current_cache_file_count').text(wpoptimize.number_of_files + ' ' + response.file_count);
 	}
+
+	
+	$('#wpo-auto-preload-after-purge').on('click', function() {
+		var clicked_btn = this;
+		var success_icon = $(this).closest('.wpo-fieldgroup__subgroup').find('.dashicons-yes');
+		
+		clicked_btn.disabled = true;
+		
+		block_ui(wpoptimize.saving);
+		
+		send_command(
+			'save_cache_auto_preload_option',
+			{ enabled: !!clicked_btn.checked },
+			function(response) {
+				clicked_btn.disabled = false;
+				$.unblockUI();
+				if (response.success) {
+					success_icon.show().fadeOut(1000);
+				} else {
+					clicked_btn.checked = !clicked_btn.checked;
+					alert(response.message);
+				}
+				
+			}
+		);
+	});
 
 	wp_optimize.cache_settings = gather_cache_settings;
 };

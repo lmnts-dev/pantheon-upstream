@@ -813,7 +813,8 @@ class Net_SFTP extends Net_SSH2
                 return false;
             }
             $this->canonicalize_paths = false;
-            $this->_reset_connection(NET_SSH2_DISCONNECT_CONNECTION_LOST);
+            $this->_reset_sftp();
+            return $this->_init_sftp_connection();
         }
 
         $this->_update_stat_cache($this->pwd, array());
@@ -926,7 +927,7 @@ class Net_SFTP extends Net_SSH2
 
         $error = $this->status_codes[$status];
 
-        if ($this->version > 2 || strlen($response) < 4) {
+        if ($this->version > 2) {
             extract(unpack('Nlength', $this->_string_shift($response, 4)));
             $this->sftp_errors[] = $error . ': ' . $this->_string_shift($response, $length);
         } else {
@@ -969,6 +970,8 @@ class Net_SFTP extends Net_SSH2
      */
     function _realpath($path)
     {
+        $path = (string) $path;
+
         if (!$this->canonicalize_paths) {
             if ($this->pwd === true) {
                 return '.';
@@ -1062,6 +1065,8 @@ class Net_SFTP extends Net_SSH2
             return false;
         }
 
+        $dir = (string) $dir;
+
         // assume current dir if $dir is empty
         if ($dir === '') {
             $dir = './';
@@ -1071,6 +1076,9 @@ class Net_SFTP extends Net_SSH2
         }
 
         $dir = $this->_realpath($dir);
+        if ($dir === false) {
+            return false;
+        }
 
         // confirm that $dir is, in fact, a valid directory
         if ($this->use_stat_cache && is_array($this->_query_stat_cache($dir))) {
@@ -2748,14 +2756,6 @@ class Net_SFTP extends Net_SSH2
             }
         }
 
-        if ($length > 0 && $length <= $offset - $start) {
-            if ($local_file === false) {
-                $content = substr($content, 0, $length);
-            } else {
-                ftruncate($fp, $length + $res_offset);
-            }
-        }
-
         if ($fclose_check) {
             fclose($fp);
 
@@ -3692,6 +3692,19 @@ class Net_SFTP extends Net_SSH2
     }
 
     /**
+     * Resets the SFTP channel for re-use
+     *
+     * @access private
+     */
+    function _reset_sftp()
+    {
+        $this->use_request_id = false;
+        $this->pwd = false;
+        $this->requestBuffer = array();
+        $this->partial_init = false;
+    }
+
+    /**
      * Resets a connection for re-use
      *
      * @param int $reason
@@ -3700,9 +3713,7 @@ class Net_SFTP extends Net_SSH2
     function _reset_connection($reason)
     {
         parent::_reset_connection($reason);
-        $this->use_request_id = false;
-        $this->pwd = false;
-        $this->requestBuffer = array();
+        $this->_reset_sftp();
     }
 
     /**
@@ -3851,7 +3862,7 @@ class Net_SFTP extends Net_SSH2
     }
 
     /**
-     * Returns all errors
+     * Returns all errors on the SFTP layer
      *
      * @return array
      * @access public
@@ -3862,7 +3873,7 @@ class Net_SFTP extends Net_SSH2
     }
 
     /**
-     * Returns the last error
+     * Returns the last error on the SFTP layer
      *
      * @return string
      * @access public
